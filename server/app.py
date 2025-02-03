@@ -25,8 +25,9 @@ def preprocess_image(image):
     # Convert to grayscale
     gray_image = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2GRAY)
 
-    # Apply thresholding to make the image binary
-    _, thresh_image = cv2.threshold(gray_image, 150, 255, cv2.THRESH_BINARY)
+    # Apply adaptive thresholding for better contrast
+    thresh_image = cv2.adaptiveThreshold(gray_image, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                        cv2.THRESH_BINARY, 11, 2)
 
     # Noise removal with median blur
     clean_image = cv2.medianBlur(thresh_image, 3)
@@ -60,21 +61,38 @@ async def scan_medicine(file: UploadFile = File(...)):
     processed_image = preprocess_image(image)
     
     # Extract text using Tesseract OCR
-    text = pytesseract.image_to_string(processed_image).lower()
+    text = pytesseract.image_to_string(processed_image).lower().strip()
     
-    # Find medication name
+    # Clean the text if necessary (remove unwanted characters)
+    text = ''.join(e for e in text if e.isalnum() or e.isspace())
+
+    # If no text is found, return an error message
+    if not text:
+        return {"status": "error", "message": "No text found in the image"}
+
+    # Try to find medication using the extracted text
     try:
         # Search for medication
         search_response = requests.get(f"{API_BASE_URL}/drugs.json", 
                                        params={"name": text})
+        
+        # Check if the response is successful
+        if search_response.status_code != 200:
+            return {"status": "error", "message": "Failed to fetch drug data from API"}
+        
         drugs = search_response.json().get('drugGroup', {}).get('conceptGroup', [])
         
-        if drugs and len(drugs) > 0:
+        if drugs:
             # Get first drug details
             drug_name = drugs[0].get('conceptProperties', [{}])[0].get('name', 'Unknown')
             
             # Fetch detailed drug information
             details_response = requests.get(f"{API_BASE_URL}/rxcui/{drug_name}/properties.json")
+            
+            # Check if the response is successful
+            if details_response.status_code != 200:
+                return {"status": "error", "message": "Failed to fetch drug details"}
+            
             details = details_response.json()
             
             return {
@@ -96,5 +114,5 @@ async def scan_medicine(file: UploadFile = File(...)):
     except Exception as e:
         return {
             "status": "error",
-            "message": str(e)
+            "message": f"An error occurred: {str(e)}"
         }
