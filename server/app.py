@@ -2,21 +2,11 @@ import numpy as np
 import pytesseract
 import requests
 from PIL import Image, ImageEnhance
-from fastapi import FastAPI, File, UploadFile
-from fastapi.middleware.cors import CORSMiddleware
 import io
 import cv2
+from flask import Flask, request, jsonify
 
-app = FastAPI()
-
-# CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app = Flask(__name__)
 
 API_BASE_URL = "https://rxnav.nlm.nih.gov/REST"
 
@@ -39,46 +29,52 @@ def preprocess_image(image):
     
     return enhanced_image
 
-@app.get("/")
-async def root():
+@app.route("/")
+def root():
     """
     Root endpoint to check if the medicine server is active
     """
-    return {"message": "Medicine Server is Active"}
+    return jsonify({"message": "Medicine Server is Active"})
 
-@app.post("/scan-medicine")
-async def scan_medicine(file: UploadFile = File(...)):
+@app.route("/scan-medicine", methods=["POST"])
+def scan_medicine():
     """
     Scan medicine image and fetch details from API
     """
-    # Save and process uploaded file
-    contents = await file.read()
-    
-    # Convert to PIL Image for preprocessing
-    image = Image.open(io.BytesIO(contents))
-    
-    # Preprocess image for better OCR
-    processed_image = preprocess_image(image)
-    
-    # Extract text using Tesseract OCR
-    text = pytesseract.image_to_string(processed_image).lower().strip()
-    
-    # Clean the text if necessary (remove unwanted characters)
-    text = ''.join(e for e in text if e.isalnum() or e.isspace())
-
-    # If no text is found, return an error message
-    if not text:
-        return {"status": "error", "message": "No text found in the image"}
-
-    # Try to find medication using the extracted text
     try:
-        # Search for medication
+        # Check if a file was uploaded
+        if 'file' not in request.files:
+            return jsonify({"status": "error", "message": "No file part"})
+        
+        file = request.files['file']
+
+        # If no file is selected
+        if file.filename == '':
+            return jsonify({"status": "error", "message": "No selected file"})
+        
+        # Convert to PIL Image for preprocessing
+        image = Image.open(file.stream)
+        
+        # Preprocess image for better OCR
+        processed_image = preprocess_image(image)
+        
+        # Extract text using Tesseract OCR
+        text = pytesseract.image_to_string(processed_image).lower().strip()
+        
+        # Clean the text if necessary (remove unwanted characters)
+        text = ''.join(e for e in text if e.isalnum() or e.isspace())
+
+        # If no text is found, return an error message
+        if not text:
+            return jsonify({"status": "error", "message": "No text found in the image"})
+
+        # Try to find medication using the extracted text
         search_response = requests.get(f"{API_BASE_URL}/drugs.json", 
                                        params={"name": text})
         
         # Check if the response is successful
         if search_response.status_code != 200:
-            return {"status": "error", "message": "Failed to fetch drug data from API"}
+            return jsonify({"status": "error", "message": "Failed to fetch drug data from API"})
         
         drugs = search_response.json().get('drugGroup', {}).get('conceptGroup', [])
         
@@ -91,11 +87,11 @@ async def scan_medicine(file: UploadFile = File(...)):
             
             # Check if the response is successful
             if details_response.status_code != 200:
-                return {"status": "error", "message": "Failed to fetch drug details"}
+                return jsonify({"status": "error", "message": "Failed to fetch drug details"})
             
             details = details_response.json()
             
-            return {
+            return jsonify({
                 "status": "success",
                 "medicine": {
                     "name": details.get('properties', {}).get('name', 'Unknown'),
@@ -104,15 +100,19 @@ async def scan_medicine(file: UploadFile = File(...)):
                     "dosage": "Varies by individual - consult doctor",
                     "precautions": "Always follow medical advice"
                 }
-            }
+            })
         
-        return {
+        return jsonify({
             "status": "not_found",
             "message": "Medicine not identified"
-        }
+        })
     
     except Exception as e:
-        return {
+        return jsonify({
             "status": "error",
             "message": f"An error occurred: {str(e)}"
-        }
+        })
+
+if __name__ == "__main__":
+    # Map to an open port (e.g., 8000) and allow external access
+    app.run(debug=True, host="0.0.0.0", port=8000)
