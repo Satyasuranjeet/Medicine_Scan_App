@@ -2,44 +2,58 @@ import os
 import numpy as np
 import pytesseract
 import requests
+import shutil
 from PIL import Image, ImageEnhance
 import cv2
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
+# Base URL for RxNav API
 API_BASE_URL = "https://rxnav.nlm.nih.gov/REST"
 
-# Preprocess the image for better OCR
+# Dynamically detect Tesseract path
+tesseract_path = shutil.which("tesseract")
+if tesseract_path:
+    pytesseract.pytesseract.tesseract_cmd = tesseract_path
+else:
+    raise FileNotFoundError("Tesseract is not installed or not found in the system PATH.")
+
+# Function to preprocess the image for better OCR accuracy
 def preprocess_image(image):
-    # Convert to grayscale
-    gray_image = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2GRAY)
+    try:
+        # Convert to grayscale
+        gray_image = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2GRAY)
 
-    # Apply adaptive thresholding for better contrast
-    thresh_image = cv2.adaptiveThreshold(gray_image, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                         cv2.THRESH_BINARY, 11, 2)
+        # Apply adaptive thresholding for better contrast
+        thresh_image = cv2.adaptiveThreshold(
+            gray_image, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
+        )
 
-    # Noise removal with median blur
-    clean_image = cv2.medianBlur(thresh_image, 3)
+        # Noise removal with median blur
+        clean_image = cv2.medianBlur(thresh_image, 3)
 
-    # Enhance the image (Optional)
-    pil_image = Image.fromarray(clean_image)
-    enhancer = ImageEnhance.Contrast(pil_image)
-    enhanced_image = enhancer.enhance(2.0)  # Increase contrast
-    
-    return enhanced_image
+        # Enhance the image (Optional)
+        pil_image = Image.fromarray(clean_image)
+        enhancer = ImageEnhance.Contrast(pil_image)
+        enhanced_image = enhancer.enhance(2.0)  # Increase contrast
+        
+        return enhanced_image
+
+    except Exception as e:
+        raise RuntimeError(f"Image preprocessing failed: {str(e)}")
 
 @app.route("/")
 def root():
     """
-    Root endpoint to check if the medicine server is active
+    Root endpoint to check if the medicine server is active.
     """
     return jsonify({"message": "Medicine Server is Active"})
 
 @app.route("/scan-medicine", methods=["POST"])
 def scan_medicine():
     """
-    Scan medicine image and fetch details from API
+    Scan medicine image and fetch details from API.
     """
     try:
         # Check if a file was uploaded
@@ -61,7 +75,7 @@ def scan_medicine():
         # Extract text using Tesseract OCR
         text = pytesseract.image_to_string(processed_image).lower().strip()
         
-        # Clean the text if necessary (remove unwanted characters)
+        # Clean the text (remove special characters)
         text = ''.join(e for e in text if e.isalnum() or e.isspace())
 
         # If no text is found, return an error message
@@ -69,28 +83,27 @@ def scan_medicine():
             return jsonify({"status": "error", "message": "No text found in the image"})
 
         # Try to find medication using the extracted text
-        search_response = requests.get(f"{API_BASE_URL}/drugs.json", 
-                                       params={"name": text})
+        search_response = requests.get(f"{API_BASE_URL}/drugs.json", params={"name": text})
         
         # Check if the response is successful
         if search_response.status_code != 200:
             return jsonify({"status": "error", "message": "Failed to fetch drug data from API"})
         
         drugs = search_response.json().get('drugGroup', {}).get('conceptGroup', [])
-        
+
         if drugs:
             # Get first drug details
             drug_name = drugs[0].get('conceptProperties', [{}])[0].get('name', 'Unknown')
-            
+
             # Fetch detailed drug information
             details_response = requests.get(f"{API_BASE_URL}/rxcui/{drug_name}/properties.json")
-            
+
             # Check if the response is successful
             if details_response.status_code != 200:
                 return jsonify({"status": "error", "message": "Failed to fetch drug details"})
             
             details = details_response.json()
-            
+
             return jsonify({
                 "status": "success",
                 "medicine": {
@@ -106,7 +119,7 @@ def scan_medicine():
             "status": "not_found",
             "message": "Medicine not identified"
         })
-    
+
     except Exception as e:
         return jsonify({
             "status": "error",
@@ -114,4 +127,5 @@ def scan_medicine():
         })
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    port = int(os.environ.get("PORT", 5000))  # Use dynamic port if deployed
+    app.run(host="0.0.0.0", port=port, debug=True)
