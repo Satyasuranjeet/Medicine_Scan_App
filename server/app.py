@@ -1,110 +1,165 @@
 import os
+import logging
+import tempfile
 import requests
 from flask import Flask, request, jsonify
-from PIL import Image
+from werkzeug.utils import secure_filename
+
+# Set up logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# API key for OCR.Space
-OCR_API_KEY = 'K82241976688957'
+# OCR.Space API credentials
+OCR_SPACE_API_KEY = 'K82241976688957'  # Replace with your OCR.Space API key
 
-# Function to process the image using OCR.Space API
-def ocr_space_file(filename, overlay=False, api_key=OCR_API_KEY, language='eng'):
-    """OCR.space API request with local file."""
-    payload = {
-        'isOverlayRequired': overlay,
-        'apikey': api_key,
-        'language': language,
-    }
-    with open(filename, 'rb') as f:
-        r = requests.post('https://api.ocr.space/parse/image',
-                          files={filename: f},
-                          data=payload)
-    return r.json()
+def parse_ocr_response(ocr_response):
+    """Parse OCR response and extract medicine information."""
+    try:
+        # Check if response contains ParsedResults
+        if not isinstance(ocr_response, dict) or 'ParsedResults' not in ocr_response:
+            raise ValueError("Invalid OCR response format")
 
-@app.route("/")
-def root():
-    """Root endpoint to check if the medicine server is active."""
-    return jsonify({"message": "Medicine Server is Active"})
+        parsed_results = ocr_response['ParsedResults']
+        if not parsed_results or not isinstance(parsed_results[0], dict):
+            raise ValueError("No parsed results found")
+
+        # Extract text from ParsedResults
+        if 'ParsedText' in parsed_results[0]:
+            return parsed_results[0]['ParsedText']
+        
+        # Fallback to TextOverlay if ParsedText is not available
+        if 'TextOverlay' in parsed_results[0]:
+            lines = parsed_results[0]['TextOverlay'].get('Lines', [])
+            return ' '.join(line.get('LineText', '') for line in lines)
+            
+        raise ValueError("No text content found in OCR response")
+        
+    except Exception as e:
+        logger.error(f"Error parsing OCR response: {str(e)}")
+        raise
+
+def extract_medicine_info(text):
+    """Extract medicine name and details from OCR text."""
+    try:
+        lines = text.split('\n')
+        medicine_info = {
+            'name': '',
+            'composition': [],
+            'dosage': '',
+            'manufacturer': '',
+            'batch_no': '',
+            'mfg_date': '',
+            'expiry_date': ''
+        }
+        
+        for line in lines:
+            line = line.strip()
+            if line.startswith('Rx '):
+                medicine_info['name'] = line.replace('Rx ', '')
+            elif 'mg' in line and ':' not in line and 'Contains' not in line:
+                medicine_info['composition'].append(line.strip())
+            elif line.startswith('Dosage:'):
+                medicine_info['dosage'] = line.replace('Dosage:', '').strip()
+            elif 'LABORATORIES' in line or 'LTD.' in line:
+                medicine_info['manufacturer'] = line.strip()
+            elif line.startswith('Batch No.'):
+                next_idx = lines.index(line) + 1
+                if next_idx < len(lines):
+                    medicine_info['batch_no'] = lines[next_idx].strip()
+            elif 'Mfg. Date' in line:
+                next_idx = lines.index(line) + 1
+                if next_idx < len(lines):
+                    medicine_info['mfg_date'] = lines[next_idx].strip()
+            elif 'Expiry Date' in line:
+                next_idx = lines.index(line) + 1
+                if next_idx < len(lines):
+                    medicine_info['expiry_date'] = lines[next_idx].strip()
+        
+        return medicine_info
+    except Exception as e:
+        logger.error(f"Error extracting medicine info: {str(e)}")
+        raise
 
 @app.route("/scan-medicine", methods=["POST"])
 def scan_medicine():
-    """Scan medicine image and fetch details from API."""
     try:
         # Check if a file was uploaded
         if 'file' not in request.files:
-            return jsonify({"status": "error", "message": "No file part"})
+            return jsonify({"status": "error", "message": "No file uploaded"})
 
         file = request.files['file']
-
-        # If no file is selected
         if file.filename == '':
             return jsonify({"status": "error", "message": "No selected file"})
 
-        # Save the uploaded image temporarily to process it
-        filename = os.path.join("/tmp", file.filename)
-        file.save(filename)
+        # Save the uploaded image temporarily
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as temp_file:
+            file.save(temp_file.name)
+            temp_path = temp_file.name
 
-        # Use OCR.Space API to extract text from the image
-        ocr_response = ocr_space_file(filename)
+        try:
+            # Call OCR.Space API
+            with open(temp_path, 'rb') as image_file:
+                payload = {
+                    'apikey': OCR_SPACE_API_KEY,
+                    'language': 'eng',
+                    'isOverlayRequired': True,
+                    'detectOrientation': True,
+                    'scale': True,
+                    'OCREngine': 2  # Using more accurate OCR engine
+                }
+                files = {'file': image_file}
+                
+                response = requests.post(
+                    'https://api.ocr.space/parse/image',
+                    files=files,
+                    data=payload
+                )
+                response.raise_for_status()
+                ocr_response = response.json()
 
-        # Extract the text result from the OCR response
-        text = ""
-        if ocr_response.get('OCRExitCode') == 1:
-            # Extracting the OCR text result
-            text = ' '.join([line['text'] for line in ocr_response.get('ParsedResults', [])[0].get('TextOverlay', {}).get('Lines', [])])
+            # Process OCR response
+            if 'ErrorMessage' in ocr_response and ocr_response['ErrorMessage']:
+                return jsonify({
+                    "status": "error",
+                    "message": f"OCR API Error: {ocr_response['ErrorMessage']}"
+                })
 
-        # Clean the text (remove special characters)
-        text = ''.join(e for e in text if e.isalnum() or e.isspace())
+            # Extract text from OCR response
+            extracted_text = parse_ocr_response(ocr_response)
+            if not extracted_text:
+                return jsonify({
+                    "status": "error",
+                    "message": "No text could be extracted from the image"
+                })
 
-        # If no text is found, return an error message
-        if not text:
-            return jsonify({"status": "error", "message": "No text found in the image"})
-
-        # Try to find medication using the extracted text
-        search_response = requests.get(f"https://rxnav.nlm.nih.gov/REST/drugs.json", params={"name": text})
-
-        # Check if the response is successful
-        if search_response.status_code != 200:
-            return jsonify({"status": "error", "message": "Failed to fetch drug data from API"})
-
-        drugs = search_response.json().get('drugGroup', {}).get('conceptGroup', [])
-
-        if drugs:
-            # Get first drug details
-            drug_name = drugs[0].get('conceptProperties', [{}])[0].get('name', 'Unknown')
-
-            # Fetch detailed drug information
-            details_response = requests.get(f"https://rxnav.nlm.nih.gov/REST/rxcui/{drug_name}/properties.json")
-
-            # Check if the response is successful
-            if details_response.status_code != 200:
-                return jsonify({"status": "error", "message": "Failed to fetch drug details"})
-
-            details = details_response.json()
-
+            # Extract medicine information
+            medicine_info = extract_medicine_info(extracted_text)
+            
             return jsonify({
                 "status": "success",
-                "medicine": {
-                    "name": details.get('properties', {}).get('name', 'Unknown'),
-                    "rxcui": details.get('properties', {}).get('rxcui', 'N/A'),
-                    "uses": "Consult healthcare professional for specific uses",
-                    "dosage": "Varies by individual - consult doctor",
-                    "precautions": "Always follow medical advice"
-                }
+                "medicine": medicine_info
             })
 
-        return jsonify({
-            "status": "not_found",
-            "message": "Medicine not identified"
-        })
+        finally:
+            # Clean up temporary file
+            try:
+                os.unlink(temp_path)
+            except Exception as e:
+                logger.warning(f"Error deleting temporary file: {str(e)}")
 
-    except Exception as e:
+    except requests.exceptions.RequestException as e:
         return jsonify({
             "status": "error",
-            "message": f"An error occurred: {str(e)}"
+            "message": f"Error communicating with OCR service: {str(e)}"
+        })
+    except Exception as e:
+        logger.error(f"Unexpected error: {str(e)}")
+        return jsonify({
+            "status": "error",
+            "message": f"An unexpected error occurred: {str(e)}"
         })
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))  # Use dynamic port if deployed
-    app.run(host="0.0.0.0", port=port, debug=True)
+    app.run(debug=True)
