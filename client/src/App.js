@@ -18,7 +18,7 @@ const App = () => {
     formData.append('file', file);
 
     try {
-      const response = await axios.post('http://localhost:8000/scan-medicine', formData, {
+      const response = await axios.post('https://medicine-scan-app.onrender.com/scan-medicine', formData, {
         headers: { 'Content-Type': 'multipart/form-data' }
       });
 
