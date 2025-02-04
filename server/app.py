@@ -1,8 +1,8 @@
+import os
 import numpy as np
 import pytesseract
 import requests
 from PIL import Image, ImageEnhance
-import io
 import cv2
 from flask import Flask, request, jsonify
 
@@ -17,7 +17,7 @@ def preprocess_image(image):
 
     # Apply adaptive thresholding for better contrast
     thresh_image = cv2.adaptiveThreshold(gray_image, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                        cv2.THRESH_BINARY, 11, 2)
+                                         cv2.THRESH_BINARY, 11, 2)
 
     # Noise removal with median blur
     clean_image = cv2.medianBlur(thresh_image, 3)
@@ -114,5 +114,5 @@ def scan_medicine():
         })
 
 if __name__ == "__main__":
-    # Map to an open port (e.g., 8000) and allow external access
-    app.run(debug=True, host="0.0.0.0", port=8000)
+    port = int(os.environ.get("PORT", 10000))  # Get port from environment variable
+    app.run(debug=True, host="0.0.0.0", port=port)
